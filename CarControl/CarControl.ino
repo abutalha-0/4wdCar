@@ -14,7 +14,8 @@ const int IN4 = 5;  // Right side
 const int ENA = 6;  // Left side enable (PWM)
 const int ENB = 11; // Right side enable (PWM)
 
-const int SPEED = 200; // 0-255
+int speed = 200; // 0-255, changed via 'V' + one raw byte
+bool awaitingSpeedByte = false;
 
 void leftForward() {
   digitalWrite(IN1, LOW);
@@ -79,8 +80,8 @@ void setup() {
   pinMode(ENA, OUTPUT);
   pinMode(ENB, OUTPUT);
 
-  analogWrite(ENA, SPEED);
-  analogWrite(ENB, SPEED);
+  analogWrite(ENA, speed);
+  analogWrite(ENB, speed);
   stopCar();
 
   bt.begin(9600);
@@ -89,6 +90,15 @@ void setup() {
 void loop() {
   while (bt.available() > 0) {
     char c = bt.read();
+
+    if (awaitingSpeedByte) {
+      speed = (uint8_t)c;
+      analogWrite(ENA, speed);
+      analogWrite(ENB, speed);
+      awaitingSpeedByte = false;
+      continue;
+    }
+
     switch (c) {
       case 'w': case 'W':
         moveForward();
@@ -104,6 +114,9 @@ void loop() {
         break;
       case ' ':
         stopCar();
+        break;
+      case 'v': case 'V':
+        awaitingSpeedByte = true;
         break;
       default:
         break;
