@@ -239,11 +239,15 @@ const unsigned long SETTLE_PAUSE_MS = 150; // brief full-stop pause before rever
                                             // voltage enough to glitch the Bluetooth link
                                             // mid-command - a short pause avoids that.
 const unsigned long BACKUP_DURATION_MS = 400;     // how long to reverse away from an obstacle
-const unsigned long SCAN_PAN_SETTLE_MS = 300;     // time to let the servo *physically* finish
+const unsigned long SCAN_PAN_SETTLE_MS = 500;     // time to let the servo *physically* finish
                                                    // swinging before trusting the reading -
                                                    // reading too early measures whatever the
                                                    // sensor was pointed at mid-swing, not left/right.
-const unsigned long TURN_STEP_DURATION_MS = 400;  // one "attempt" worth of turning
+                                                   // Raised from 300ms - scans were reading before
+                                                   // the servo had actually settled.
+const unsigned long TURN_STEP_DURATION_MS = 850;  // one "attempt" worth of turning. Raised from
+                                                   // 400ms - was routinely needing 2+ AUTO_VERIFY
+                                                   // retries to actually clear an obstacle.
 const int MAX_TURN_ATTEMPTS = 4;                  // bounded retries per obstacle - see AUTO_VERIFY
 const unsigned long FULL_SPIN_DURATION_MS = 1200; // used once small turns have been retried
                                                    // MAX_TURN_ATTEMPTS times and still haven't
