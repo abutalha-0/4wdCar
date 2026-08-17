@@ -3,6 +3,7 @@
 // Servo mode:       A = pan left, D = pan right, W = center, entered/exited via 'g'/'c'
 // Autonomous mode:  entered with 'o', exited (like Servo mode) with 'c'.
 //                    Drives itself; W/A/S/D/V have no effect until 'c' is sent.
+// Always on:         H/J = horn on/off, 1-8 = RGB color preset
 
 #include <SoftwareSerial.h>
 #include <Servo.h>
@@ -89,6 +90,46 @@ const unsigned long ECHO_TIMEOUT_US = 12000;
 
 int speed = 200; // 0-255, changed via 'V' + one raw byte
 bool awaitingSpeedByte = false;
+
+// --- Buzzer + RGB ---------------------------------------------------------
+// Both "always on" like V/G/C/O below - they work no matter which of
+// Car/Servo/Auto mode is active, since they're independent of the drivetrain.
+//
+// Despite being sold as a "module", this buzzer is a passive piezo with no
+// onboard oscillator - a static digitalWrite HIGH/LOW just flexes the disc
+// once (an audible click), not a tone. tone()/noTone() generates the actual
+// square wave needed for continuous sound.
+//
+// Tradeoff: tone() uses Timer2 internally, which is also what generates
+// ENB's PWM (right motor speed, pin 11) - see the L298N pin table in
+// README.md. So playing the horn briefly hijacks the right motor's speed
+// control. restoreMotorPWM() re-issues analogWrite(ENB, ...) the instant
+// the horn stops to put it back. ENA (Timer0) is untouched either way.
+const int BUZZER_PIN = A0;
+const int HORN_FREQUENCY_HZ = 2000;
+// restoreMotorPWM() is defined further down, after autonomousMode/AUTO_SPEED
+// exist - it needs both, and Arduino only auto-forward-declares functions,
+// not the plain global variables/constants they reference.
+
+// Two common-cathode RGB modules wired in parallel to the same three pins -
+// they always show the same color. HIGH turns a color on. Only 4 pins were
+// free (A0-A3) and two independently-controlled modules would have needed
+// 6, so this was the tradeoff (see README).
+const int RED_PIN = A3;
+const int GREEN_PIN = A2;
+const int BLUE_PIN = A1;
+
+void setColor(bool r, bool g, bool b) {
+  digitalWrite(RED_PIN, r ? HIGH : LOW);
+  digitalWrite(GREEN_PIN, g ? HIGH : LOW);
+  digitalWrite(BLUE_PIN, b ? HIGH : LOW);
+}
+
+// idx 0-7, selected by digits '1'-'8': off, red, green, blue, yellow, cyan,
+// magenta, white (binary R/G/B bits of idx).
+void setColorPreset(int idx) {
+  setColor(idx & 1, (idx >> 1) & 1, (idx >> 2) & 1);
+}
 
 // --- Mode-switch debounce -----------------------------------------------
 // Movement bytes (w/a/s/d/space) are low-stakes if one gets corrupted by
@@ -205,6 +246,15 @@ long autoLeftDistance = 0;
 long autoRightDistance = 0;
 int autoTurnDirection = 0;  // -1 = turning left, +1 = turning right
 int autoTurnAttempts = 0;   // retries so far on the *current* obstacle (reset when a new one is found)
+
+// Re-applies the correct PWM duty cycle to ENA/ENB. Needed after tone()
+// (used by the horn) touches Timer2, which also generates ENB's PWM - see
+// the BUZZER_PIN comment above.
+void restoreMotorPWM() {
+  int pwm = autonomousMode ? AUTO_SPEED : speed;
+  analogWrite(ENA, pwm);
+  analogWrite(ENB, pwm);
+}
 
 void leftForward() {
   digitalWrite(IN1, LOW);
@@ -581,6 +631,14 @@ void setup() {
   pinMode(TRIG_PIN, OUTPUT);
   pinMode(ECHO_PIN, INPUT);
 
+  // No pinMode()/idle-state needed here - tone()/noTone() manage the pin
+  // themselves, and it starts silent (noTone() never called) by default.
+
+  pinMode(RED_PIN, OUTPUT);
+  pinMode(GREEN_PIN, OUTPUT);
+  pinMode(BLUE_PIN, OUTPUT);
+  setColor(false, false, false);
+
   // Probe for the LCD rather than assuming it's there - a loose wire should
   // cost us the display, not stall the car on a blocking I2C write.
   Wire.begin();
@@ -657,6 +715,22 @@ void loop() {
         panServo.detach();
         lcdLog("MODE: CAR");
       }
+      continue;
+    }
+
+    if (c == 'h' || c == 'H') {
+      tone(BUZZER_PIN, HORN_FREQUENCY_HZ); // hijacks Timer2 - see BUZZER_PIN comment
+      lcdLog("HORN ON");
+      continue;
+    }
+    if (c == 'j' || c == 'J') {
+      noTone(BUZZER_PIN);
+      restoreMotorPWM(); // Timer2 was just reconfigured by tone() - put ENB's PWM back
+      lcdLog("HORN OFF");
+      continue;
+    }
+    if (c >= '1' && c <= '8') {
+      setColorPreset(c - '1');
       continue;
     }
 

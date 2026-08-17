@@ -77,6 +77,36 @@ class CarGUI:
         make_button("Right", "d", 1, 2)
         make_button("Backward", "s", 2, 1)
 
+        extras = tk.Frame(root)
+        extras.pack(padx=10, fill="x")
+
+        # Horn and RGB work in every mode (Car/Servo/Auto), unlike the drive
+        # pad above, so these go in drive_widgets (connection-gated only) not
+        # manual_widgets (which also disables under Auto mode).
+        self.horn_button = tk.Button(extras, text="Horn", width=8, height=2, state="disabled")
+        self.horn_button.pack(side="left")
+        self.horn_button.bind("<ButtonPress-1>", lambda e: self.send("h", "Horn ON"))
+        self.horn_button.bind("<ButtonRelease-1>", lambda e: self.send("j", "Horn OFF"))
+        self.drive_widgets.append(self.horn_button)
+
+        colors = [
+            ("Off", "1", "#dddddd"),
+            ("Red", "2", "#ff4d4d"),
+            ("Green", "3", "#4dff4d"),
+            ("Blue", "4", "#4d4dff"),
+            ("Yellow", "5", "#ffff4d"),
+            ("Cyan", "6", "#4dffff"),
+            ("Magenta", "7", "#ff4dff"),
+            ("White", "8", "#ffffff"),
+        ]
+        for label, digit, color in colors:
+            b = tk.Button(
+                extras, text=label, width=4, bg=color, state="disabled",
+                command=lambda d=digit, l=label: self.send(d, f"RGB {l}"),
+            )
+            b.pack(side="left", padx=2)
+            self.drive_widgets.append(b)
+
         tk.Label(root, text="Speed").pack(anchor="w", padx=10)
         self.speed_scale = tk.Scale(
             root, from_=0, to=255, orient="horizontal",
