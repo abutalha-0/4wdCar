@@ -111,6 +111,27 @@ const int HORN_FREQUENCY_HZ = 2000;
 // exist - it needs both, and Arduino only auto-forward-declares functions,
 // not the plain global variables/constants they reference.
 
+// Non-blocking obstacle-alert beep (Autonomous mode). Deliberately capped at
+// SETTLE_PAUSE_MS (150ms further down) rather than something longer - that's
+// exactly how long AUTO_STOP_PAUSE waits before the car actually starts
+// reversing, so the beep (and the Timer2/ENB hijack that comes with it, see
+// above) is guaranteed to finish before the motors move again. A longer beep
+// would bleed into the reverse maneuver and skew the right motor's speed
+// while it's actually driving.
+bool beeping = false;
+unsigned long beepStartedAt = 0;
+const unsigned long OBSTACLE_BEEP_MS = 150;
+
+// Called every loop() pass - ends the beep (and restores motor PWM) once
+// OBSTACLE_BEEP_MS has passed. Cheap no-op check when not beeping.
+void updateObstacleBeep() {
+  if (beeping && millis() - beepStartedAt >= OBSTACLE_BEEP_MS) {
+    noTone(BUZZER_PIN);
+    restoreMotorPWM();
+    beeping = false;
+  }
+}
+
 // Two common-cathode RGB modules wired in parallel to the same three pins -
 // they always show the same color. HIGH turns a color on. Only 4 pins were
 // free (A0-A3) and two independently-controlled modules would have needed
@@ -130,6 +151,17 @@ void setColor(bool r, bool g, bool b) {
 void setColorPreset(int idx) {
   setColor(idx & 1, (idx >> 1) & 1, (idx >> 2) & 1);
 }
+
+// --- Autonomous mode RGB status (red/white/blue-green from here on are
+// driven by updateAutonomous(), overriding whatever '1'-'8' last set - the
+// two aren't meant to be used together) ------------------------------------
+// While driving straight with nothing in the way, alternate blue/green as a
+// "running normally" heartbeat. Toggled by whichever pass through AUTO_DRIVE
+// next crosses COLOR_BLINK_INTERVAL_MS - no need to reset the phase on
+// re-entry, it just continues from wherever it was.
+unsigned long lastColorToggleAt = 0;
+bool blinkBlueNotGreen = true;
+const unsigned long COLOR_BLINK_INTERVAL_MS = 500;
 
 // --- Mode-switch debounce -----------------------------------------------
 // Movement bytes (w/a/s/d/space) are low-stakes if one gets corrupted by
@@ -444,6 +476,9 @@ void enterAutonomousMode() {
   bt.print("A:"); bt.println(AUTO_LOOK_CENTER_ANGLE);
   autoTurnAttempts = 0;
   autoLastDistanceCheck = millis();
+  setColor(false, false, true); // start on blue - next AUTO_DRIVE pass picks up the blink from here
+  lastColorToggleAt = millis();
+  blinkBlueNotGreen = true;
   moveForward();
   autoEnterState(AUTO_DRIVE);
 }
@@ -460,6 +495,8 @@ void exitAutonomousMode() {
   stopCar();
   analogWrite(ENA, speed); // restore the manually-set speed (V command)
   analogWrite(ENB, speed);
+  setColorPreset(0); // off - don't leave a leftover red/white/blue from Autonomous behind
+  if (beeping) { noTone(BUZZER_PIN); beeping = false; } // in case 'c' arrives mid-beep
 }
 
 // Advances the autonomous state machine by (at most) one step. Called once
@@ -498,8 +535,20 @@ void updateAutonomous() {
         if (distance < OBSTACLE_STOP_CM) {
           stopCar();
           autoTurnAttempts = 0; // this is a brand new obstacle - fresh retry budget
+          setColorPreset(1); // red - obstacle alert
+          tone(BUZZER_PIN, HORN_FREQUENCY_HZ);
+          beeping = true;
+          beepStartedAt = now;
           autoEnterState(AUTO_STOP_PAUSE);
         }
+      }
+
+      // autoState may have just changed above (obstacle found) - only blink
+      // the "driving normally" heartbeat if we're actually still driving.
+      if (autoState == AUTO_DRIVE && now - lastColorToggleAt >= COLOR_BLINK_INTERVAL_MS) {
+        lastColorToggleAt = now;
+        blinkBlueNotGreen = !blinkBlueNotGreen;
+        setColor(false, !blinkBlueNotGreen, blinkBlueNotGreen);
       }
       break;
 
@@ -576,6 +625,7 @@ void updateAutonomous() {
           (autoTurnAttempts > MAX_TURN_ATTEMPTS) ? FULL_SPIN_DURATION_MS : TURN_STEP_DURATION_MS;
       if (elapsed >= turnDuration) {
         stopCar();
+        setColorPreset(7); // white - finished turning, about to verify it worked
         autoEnterState(AUTO_VERIFY_PAUSE);
       }
       break;
@@ -809,6 +859,8 @@ void loop() {
   if (autonomousMode) {
     updateAutonomous();
   }
+
+  updateObstacleBeep(); // no-op unless an obstacle beep is currently timing out
 
   // Last thing each pass: throttled, change-only, so it costs almost nothing
   // on the passes where nothing moved.
