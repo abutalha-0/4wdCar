@@ -21,6 +21,8 @@ KEY_MAP = {
     "d": ("d", "Right"), "right": ("d", "Right"),
 }
 
+MODE_COMMANDS = {"car": b"c", "servo": b"g", "auto": b"o"}
+
 
 class CarGUI:
     def __init__(self, root):
@@ -28,8 +30,10 @@ class CarGUI:
         self.root = root
         self.pressed = set()
         self.release_timers = {}
-        self.servo_mode = False
-        self.drive_widgets = []
+        self.mode = "car"  # "car", "servo", or "auto"
+        self.connected = False
+        self.drive_widgets = []  # gated by connection state only
+        self.manual_widgets = []  # also gated by mode != "auto" (Autonomous drives itself)
         root.title("4WD Car Control")
 
         top = tk.Frame(root)
@@ -40,19 +44,16 @@ class CarGUI:
         self.status_label.pack(side="left", padx=8)
         mode_toggle = tk.Frame(top, bd=1, relief="solid")
         mode_toggle.pack(side="left", padx=8)
-        self.car_toggle = tk.Button(
-            mode_toggle, text="Car", width=6, state="disabled", bd=0,
-            command=lambda: self.set_mode(False),
-        )
-        self.car_toggle.pack(side="left")
-        self.servo_toggle = tk.Button(
-            mode_toggle, text="Servo", width=6, state="disabled", bd=0,
-            command=lambda: self.set_mode(True),
-        )
-        self.servo_toggle.pack(side="left")
-        self.default_button_bg = self.car_toggle.cget("bg")
-        self.drive_widgets.append(self.car_toggle)
-        self.drive_widgets.append(self.servo_toggle)
+        self.mode_toggles = {}
+        for mode, label in (("car", "Car"), ("servo", "Servo"), ("auto", "Auto")):
+            b = tk.Button(
+                mode_toggle, text=label, width=5, state="disabled", bd=0,
+                command=lambda m=mode: self.set_mode(m),
+            )
+            b.pack(side="left")
+            self.mode_toggles[mode] = b
+            self.drive_widgets.append(b)
+        self.default_button_bg = self.mode_toggles["car"].cget("bg")
         self.update_mode_toggle()
         self.distance_label = tk.Label(top, text="Distance: -- cm")
         self.distance_label.pack(side="left", padx=8)
@@ -67,7 +68,7 @@ class CarGUI:
             b.grid(row=row, column=col, padx=4, pady=4)
             b.bind("<ButtonPress-1>", lambda e: self.send(cmd, text))
             b.bind("<ButtonRelease-1>", lambda e: self.send(" ", "STOP"))
-            self.drive_widgets.append(b)
+            self.manual_widgets.append(b)
             return b
 
         make_button("Forward", "w", 0, 1)
@@ -83,7 +84,7 @@ class CarGUI:
         )
         self.speed_scale.set(200)
         self.speed_scale.pack(fill="x", padx=10)
-        self.drive_widgets.append(self.speed_scale)
+        self.manual_widgets.append(self.speed_scale)
 
         tk.Label(root, text="Log").pack(anchor="w", padx=10)
         self.log = tk.Text(root, width=50, height=12, state="disabled")
@@ -121,8 +122,10 @@ class CarGUI:
 
         self.status_label.configure(text="Connected", fg="green")
         self.connect_button.configure(text="Reconnect", state="normal")
+        self.connected = True
         for w in self.drive_widgets:
             w.configure(state="normal")
+        self.update_manual_widgets_state()
         self.log_message(f"Connected to {PORT}.")
 
         threading.Thread(target=self.read_loop, daemon=True).start()
@@ -157,7 +160,7 @@ class CarGUI:
 
     def on_key_press(self, event):
         key = event.keysym.lower()
-        if key not in KEY_MAP:
+        if key not in KEY_MAP or self.mode == "auto":
             return
         timer = self.release_timers.pop(key, None)
         if timer is not None:
@@ -181,27 +184,42 @@ class CarGUI:
 
         self.release_timers[key] = self.root.after(50, do_release)
 
-    def set_mode(self, servo):
-        if self.ser is None or servo == self.servo_mode:
+    def set_mode(self, mode):
+        if self.ser is None or mode == self.mode:
             return
-        self.servo_mode = servo
-        if servo:
-            self.ser.write(b"g")
-            self.log_message("Switched to Servo debug mode. W=center, A=pan left, D=pan right.")
-        else:
-            self.ser.write(b"c")
-            self.log_message("Switched back to Car mode.")
+        self.mode = mode
+        # Sent 3 times: the Arduino requires a mode-switch byte to arrive
+        # 3 times in a row within half a second before it takes effect, so
+        # noise-corrupted bytes on the Bluetooth link can't accidentally
+        # flip modes mid-drive.
+        for _ in range(3):
+            self.ser.write(MODE_COMMANDS[mode])
+        messages = {
+            "car": "Switched back to Car mode.",
+            "servo": "Switched to Servo debug mode. W=center, A=pan left, D=pan right.",
+            "auto": "Switched to Autonomous mode. Drives itself; manual controls disabled until Car is selected.",
+        }
+        self.log_message(messages[mode])
         self.update_mode_toggle()
+        self.update_manual_widgets_state()
 
     def update_mode_toggle(self):
         active_bg = "#3a7bd5"
         active_fg = "white"
-        if self.servo_mode:
-            self.car_toggle.configure(bg=self.default_button_bg, fg="black", relief="raised")
-            self.servo_toggle.configure(bg=active_bg, fg=active_fg, relief="sunken")
-        else:
-            self.car_toggle.configure(bg=active_bg, fg=active_fg, relief="sunken")
-            self.servo_toggle.configure(bg=self.default_button_bg, fg="black", relief="raised")
+        for mode, button in self.mode_toggles.items():
+            if mode == self.mode:
+                button.configure(bg=active_bg, fg=active_fg, relief="sunken")
+            else:
+                button.configure(bg=self.default_button_bg, fg="black", relief="raised")
+
+    def update_manual_widgets_state(self):
+        # Manual drive controls only make sense when connected AND not in
+        # Autonomous mode (the Arduino ignores them there anyway, but
+        # disabling avoids the confusing "I pressed forward and nothing
+        # happened" experience).
+        state = "normal" if (self.connected and self.mode != "auto") else "disabled"
+        for w in self.manual_widgets:
+            w.configure(state=state)
 
     def on_speed_change(self, value):
         if self.ser is None:
