@@ -62,15 +62,32 @@ If the servo jitters while holding a position, it's most likely noise from the L
 
 Mounted at the front of the chassis with the HC-SR04 on its horn.
 
-The servo ended up mounted physically reversed relative to how it was bench-tested — commanding a higher angle (via `A` in Servo mode) actually pans the sensor left, and a lower angle pans it right. `CarControl.ino` compensates for this in software (see Controls below) so the on-screen "pan left"/"pan right" behavior matches reality; the raw angle sent to `Servo.write()` is still just 0-180.
+With the servo as currently mounted, a **higher** angle points the sensor **left** and a lower angle points it right. `CarControl.ino` encodes this in one place per mode — the `'a'`/`'d'` cases in Servo mode, and `AUTO_LOOK_LEFT_ANGLE`/`AUTO_LOOK_RIGHT_ANGLE` for Autonomous. If the servo is ever remounted and left/right come out swapped, flip both together (they're commented as such) so manual panning and autonomous scanning stay consistent.
 
 ---
 
 ## Power
 
-- Battery → L298N motor power
-- USB → Arduino (during development)
-- Arduino GND connected to L298N GND
+- Battery (2× 3.7V Li-ion, ~7.4V) → L298N motor power
+- **Arduino → its own separate supply** (USB, powerbank, or a dedicated regulator) — see below
+- All grounds common: Arduino GND ↔ L298N GND ↔ battery GND
+
+### The Arduino must not be powered from the L298N's 5V regulator
+
+This one cost a long debugging session, so it's worth stating plainly: **do not feed the Arduino's 5V pin from the L298N's onboard 5V output.**
+
+That regulator is a small linear regulator meant only to power the L298N's own logic — a few tens of mA. Running the Arduino + HC-05 + HC-SR04 + servo from it is far beyond what it can hold up. When the motors draw current the battery sags, the regulator loses its input headroom, its 5V output collapses, and **the Arduino brown-out resets**.
+
+A reset is easy to mistake for a software bug, because it doesn't look like a crash:
+
+- `setup()` re-runs, so the sketch lands back in Car mode with the motors stopped
+- Autonomous mode silently stops driving — but *without* going through `exitAutonomousMode()`, so no clean exit is reported
+- Periodic distance telemetry starts up again (it only runs outside Autonomous mode), so the GUI looks partly alive
+- Symptoms cluster around the moments of peak current draw: starting the motors, or the servo swinging
+
+If any of that shows up, check for a `BOOT` line in the GUI log. `setup()` prints it once, so **`BOOT` appearing mid-run means the board reset** — that's a power problem, not a logic problem.
+
+The servo has the same requirement for the same reason (see the Servo wiring table above). If you can't separate the supplies, decoupling capacitors across the 5V rail help, but a genuinely separate supply for the Arduino is the real fix.
 
 ---
 
@@ -129,16 +146,56 @@ While in Servo mode, `W`/`A`/`S`/`D` control the pan servo instead of driving:
 | D | Pan right (steps the servo angle) |
 | W | Center (90°) |
 
-The Arduino also streams live telemetry back over the same serial link while in Servo mode:
+### Autonomous mode
 
-- `D:<cm>\n` — ultrasonic distance reading (HC-SR04), sent about every 200ms. `-1` means no echo (out of range/timeout).
-- `A:<angle>\n` — current servo angle (0-180), sent whenever it changes.
+| Key | Action |
+|-------|--------|
+| O | Enter Autonomous mode |
+| C | Return to Car mode (works at any point, including mid-maneuver) |
 
-[`gui.py`](gui.py) parses both and shows them as live "Distance" / "Servo" readouts.
+Drives itself and avoids obstacles. `W`/`A`/`S`/`D` and `V` are ignored while it's active — send `C` to take back control. It always drives at its own fixed speed (`AUTO_SPEED`), independent of whatever `V` was set to.
 
-### Known limitation
+The avoidance sequence, on finding something closer than `OBSTACLE_STOP_CM`:
 
-`Servo` and `SoftwareSerial` both depend on precise AVR interrupt timing, and can occasionally interfere with each other — a Bluetooth command can rarely be dropped mid-receive. `loop()` drains every queued byte each pass to reduce the odds of this, but it isn't fully eliminated. If a command press doesn't register, try again — this is a known hardware/library interaction, not a logic bug.
+1. Stop, pause briefly to settle
+2. Reverse away from the obstacle
+3. Pan the servo left, read distance; pan right, read distance
+4. Pick whichever side has more room, recenter the servo
+5. Pivot-turn toward that side
+6. **Verify** — re-read distance ahead. If still blocked, turn further and check again; otherwise resume driving
+
+Step 6 is the important one. Turning for a fixed guessed duration and *assuming* it worked is the usual reason a car detects an obstacle but still drives into it. Retries are bounded — after several short turns fail, it escalates to a longer spin so it can get out of a tight corner instead of retrying forever in place.
+
+Other details that keep it from behaving erratically:
+
+- **Median-of-3 distance filtering**, with "no echo" treated as *clear* rather than *close*, so a single noisy ping can't trigger a false stop.
+- **Hysteresis**: stop below `OBSTACLE_STOP_CM` (20cm), but don't resume until the path reads clearer than `OBSTACLE_CLEAR_CM` (30cm). A single shared threshold makes the car flicker between stopped and driving.
+- **Settle pauses** before every direction reversal, instead of snapping straight from forward to reverse.
+- Implemented as a **non-blocking `millis()` state machine**, never `delay()` — `loop()` keeps draining incoming bytes every pass, so `C` interrupts instantly.
+
+All the tunables (`OBSTACLE_STOP_CM`, `AUTO_SPEED`, backup/turn/scan durations, retry count) are named constants at the top of [`CarControl/CarControl.ino`](CarControl/CarControl.ino), with comments on what to adjust for which symptom.
+
+### Telemetry
+
+The Arduino streams these back over the same serial link:
+
+- `D:<cm>\n` — ultrasonic distance. `-1` means no echo (out of range/timeout). Sent about every 200ms in Car and Servo mode; throttled in Autonomous mode, which sends its own readings at the points that matter.
+- `A:<angle>\n` — current servo angle (0-180), whenever it changes.
+- `STATE:<name>\n` — Autonomous state machine transitions (`DRIVE`, `REVERSE`, `LOOK_LEFT`, …). Diagnostic.
+- `BOOT\n` — printed once by `setup()`. **Mid-run means the board reset** — see Power.
+- `EXIT_AUTO\n` — Autonomous mode exited cleanly.
+
+[`gui.py`](gui.py) parses `D:` and `A:` into live readouts and logs the rest.
+
+### Known limitations
+
+`Servo` and `SoftwareSerial` both depend on precise AVR interrupt timing and interfere with each other, and motor PWM adds electrical noise on top — Bluetooth bytes can occasionally arrive corrupted or dropped. Several things reduce this:
+
+- The servo is **attached on demand** (only in Servo and Autonomous mode) rather than at boot, so its background PWM-refresh interrupt isn't running while driving manually.
+- `pulseIn()` uses a **12ms timeout** (~2m, well beyond the thresholds that matter) instead of 30ms, cutting how long the sketch is blocked and unable to receive.
+- Mode switches (`G`/`C`/`O`) require the **same byte 3 times in a row within 500ms** before taking effect, so a corrupted byte can't silently flip modes mid-drive. `gui.py` sends each mode command three times for this reason.
+
+It isn't fully eliminated. If a command doesn't register, press again — that's the hardware/library interaction, not a logic bug.
 
 ---
 
@@ -152,7 +209,7 @@ Upload [`CarControl/CarControl.ino`](CarControl/CarControl.ino) via the Arduino 
 ./gui.sh
 ```
 
-A Tkinter window with a **Connect** button (runs `connect.sh` in the background — no need to run it separately first), drive buttons + WASD/arrow keys, a speed slider, a Car/Servo mode toggle, live Distance/Servo readouts, and a timestamped command log. Needs `python3-tk`:
+A Tkinter window with a **Connect** button (runs `connect.sh` in the background — no need to run it separately first), drive buttons + WASD/arrow keys, a speed slider, a **Car / Servo / Auto** mode toggle, live Distance/Servo readouts, and a timestamped command log. Manual controls grey out while Auto is active. Needs `python3-tk`:
 
 ```bash
 sudo apt install python3-tk
