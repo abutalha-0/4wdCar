@@ -251,14 +251,33 @@ The avoidance sequence, on finding something closer than `OBSTACLE_STOP_CM`:
 
 Step 6 is the important one. Turning for a fixed guessed duration and *assuming* it worked is the usual reason a car detects an obstacle but still drives into it. Retries are bounded — after several short turns fail, it escalates to a longer spin so it can get out of a tight corner instead of retrying forever in place.
 
+**RGB/buzzer status**, alongside the maneuver: red + a short beep the instant an obstacle is found, white once a turn finishes (about to verify), blue/green alternating every `COLOR_BLINK_INTERVAL_MS` while driving with a clear path.
+
 Other details that keep it from behaving erratically:
 
 - **Median-of-3 distance filtering**, with "no echo" treated as *clear* rather than *close*, so a single noisy ping can't trigger a false stop.
-- **Hysteresis**: stop below `OBSTACLE_STOP_CM` (20cm), but don't resume until the path reads clearer than `OBSTACLE_CLEAR_CM` (30cm). A single shared threshold makes the car flicker between stopped and driving.
+- **Hysteresis**: stop below `OBSTACLE_STOP_CM`, but don't resume until the path reads clearer than `OBSTACLE_CLEAR_CM`. A single shared threshold makes the car flicker between stopped and driving.
 - **Settle pauses** before every direction reversal, instead of snapping straight from forward to reverse.
 - Implemented as a **non-blocking `millis()` state machine**, never `delay()` — `loop()` keeps draining incoming bytes every pass, so `C` interrupts instantly.
 
-All the tunables (`OBSTACLE_STOP_CM`, `AUTO_SPEED`, backup/turn/scan durations, retry count) are named constants at the top of [`CarControl/CarControl.ino`](CarControl/CarControl.ino), with comments on what to adjust for which symptom.
+### Tuning
+
+All of these are named constants at the top of [`CarControl/CarControl.ino`](CarControl/CarControl.ino), with comments on what to adjust for which symptom. Current values, tuned against real obstacle tests:
+
+| Constant | Value | Adjust if... |
+|---|---|---|
+| `AUTO_SPEED` | 150 (of 255) | Too fast to stop in time → lower. Sluggish → raise (also widen `OBSTACLE_STOP_CM` to keep the same stopping margin). |
+| `OBSTACLE_STOP_CM` | 20cm | Stops too late/bumps things → raise. Overly cautious → lower. |
+| `OBSTACLE_CLEAR_CM` | 30cm | Flickers between stopped/driving right at the threshold → widen the gap from `OBSTACLE_STOP_CM`. |
+| `DISTANCE_CHECK_INTERVAL_MS` | 150ms | How often it re-pings the sensor while driving straight. |
+| `SETTLE_PAUSE_MS` | 150ms | Brief full-stop pause before reversing any motor direction. |
+| `BACKUP_DURATION_MS` | 400ms | How long it reverses away from an obstacle before scanning. |
+| `SCAN_PAN_SETTLE_MS` | 500ms | Servo scan reads seem unreliable → raise, it's not waiting long enough for the servo to physically finish swinging before trusting the reading. (Raised from 300ms for exactly this reason.) |
+| `TURN_STEP_DURATION_MS` | 850ms | Needs 2+ `AUTO_VERIFY` retries to actually clear an obstacle → raise. Over-turns past a clear path → lower. (Raised from 400ms for exactly this reason.) |
+| `MAX_TURN_ATTEMPTS` | 4 | Bounded retries before escalating to a full spin — see `FULL_SPIN_DURATION_MS`. |
+| `FULL_SPIN_DURATION_MS` | 1200ms | Used once `MAX_TURN_ATTEMPTS` short turns still haven't cleared it (tight corner). |
+| `OBSTACLE_BEEP_MS` | 150ms | Fixed to match `SETTLE_PAUSE_MS` — don't raise without also checking it still finishes before `AUTO_REVERSE` starts (see the comment in the sketch). |
+| `COLOR_BLINK_INTERVAL_MS` | 500ms | Blue/green blink rate while driving clear. |
 
 ### Telemetry
 
