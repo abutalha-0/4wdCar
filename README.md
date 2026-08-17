@@ -16,11 +16,15 @@ Full pin map — details for each in the sections below.
 | D10 | HC-SR04 Echo |
 | D11 | L298N ENB (right speed, PWM) |
 | D12 | HC-SR04 Trig |
+| A0 | Buzzer signal |
+| A1 | RGB Blue |
+| A2 | RGB Green |
+| A3 | RGB Red |
 | A4, A5 | LCD I2C (SDA/SCL) |
 
-**Still free: A0–A3**, plus D13 and D0/D1 with caveats — D13 shares a trace with the onboard LED, and D0/D1 are the USB serial pins, so anything wired there has to come off before each upload.
+**Every pin on the board is now in use.** What's left (D13, D0/D1) all comes with real caveats: D13 shares a trace with the onboard LED, and D0/D1 are the USB serial pins, so anything wired there has to come off before each upload.
 
-Note that **all six PWM-capable pins (D3, D5, D6, D9, D10, D11) are already in use**, so anything new that needs analog output (dimming an LED, a passive buzzer via `tone()`) has no hardware PWM left. Addressable devices that bit-bang their own signal (WS2812 LEDs) or use I2C are the easier way to expand from here.
+All six PWM-capable pins (D3, D5, D6, D9, D10, D11) were already spoken for before the buzzer/RGB went in, which shaped both of those additions — see their sections below.
 
 ### Motors
 
@@ -106,6 +110,33 @@ That second row cost real time here. The order worth checking: swap SDA and SCL,
 
 If the backpack turns out to be faulty, [`LcdDirectTest/`](LcdDirectTest/LcdDirectTest.ino) drives a bare HD44780 in 4-bit mode without it — though that needs 6 pins plus a contrast potentiometer instead of 2.
 
+### Buzzer
+
+| Buzzer module | Arduino |
+|---|---|
+| VCC | 5V |
+| GND | GND |
+| I/O (signal) | A0 |
+
+Despite being sold as a "module", this one is a passive piezo with no onboard oscillator — a static HIGH/LOW just flexes the disc once (an audible click), not a tone. `CarControl.ino` drives it with `tone()`/`noTone()` instead of `digitalWrite()`, which generates the actual square wave needed for continuous sound.
+
+That has one real side effect worth knowing about: `tone()` uses **Timer2** internally, which is the same timer that generates `ENB`'s PWM (right motor speed, D11 — see the L298N table above). So while the horn plays, the right motor's speed control is briefly hijacked. `restoreMotorPWM()` re-applies the correct PWM duty cycle the instant `noTone()` fires, so honking only affects the right motor's speed for as long as the horn is actually held.
+
+### RGB status light
+
+Two 3-pin (R/G/B + common) modules, wired **in parallel to the same three pins** — both always show the same color. That was a pin-budget decision, not a design goal: independently controlling two modules would need 6 pins, and only 4 (A0–A3) were free after the LCD and everything else.
+
+| RGB module | Arduino |
+|---|---|
+| Red | A3 |
+| Green | A2 |
+| Blue | A1 |
+| Common (GND) | GND |
+
+Both modules are **common cathode** — HIGH turns a color on, LOW turns it off. If a common-anode module goes in later, flip the logic in `setColor()` in [`CarControl/CarControl.ino`](CarControl/CarControl.ino).
+
+None of R/G/B landed on a PWM-capable pin (all six were already spoken for — see the pin map above), so this gives 8 discrete on/off combinations (off, red, green, blue, yellow, cyan, magenta, white), not smooth color fading. An addressable module (WS2812/NeoPixel) would sidestep this entirely — it only needs one data pin and doesn't use hardware PWM at all — worth considering if smooth colors matter later.
+
 ---
 
 ## Power
@@ -173,6 +204,18 @@ Single-character commands over serial (Bluetooth via `/dev/rfcomm0`, or USB), 96
 
 Send `V` followed immediately by one raw byte (0-255) to set the drive speed (PWM duty cycle on `ENA`/`ENB`). Stays in effect until the next `V` command.
 
+### Horn and RGB (always on)
+
+Like `V`, these work in **any** mode — Car, Servo, or Autonomous — since they're independent of the drivetrain.
+
+| Key | Action |
+|-------|--------|
+| H | Horn on |
+| J | Horn off |
+| 1-8 | RGB color preset: off, red, green, blue, yellow, cyan, magenta, white |
+
+Holding the horn briefly affects the right motor's speed control — see the Buzzer hardware section above for why.
+
 ### Servo/debug mode
 
 | Key | Action |
@@ -236,7 +279,7 @@ The same information also goes to the LCD, so the car is readable without the la
 | Line | Shows | Examples |
 |---|---|---|
 | 0 | Mode, the number that matters in that mode, and distance | `CAR S:200 D:42`, `SRV A:90 D:42`, `AUTO D:18` |
-| 1 | Most recent event | `BOOT`, `FORWARD`, `STOP`, `MODE: SERVO`, `LOOK_LEFT`, `VERIFY` |
+| 1 | Most recent event | `BOOT`, `FORWARD`, `STOP`, `MODE: SERVO`, `LOOK_LEFT`, `VERIFY`, `HORN ON` |
 
 Line 1 uses the same state names as the `STATE:` telemetry, which makes Autonomous mode much easier to follow — you can watch it reverse, scan, decide and verify on the display while the car is driving away from you.
 
@@ -271,7 +314,7 @@ The sketch needs one library that isn't bundled with the IDE — **LiquidCrystal
 ./gui.sh
 ```
 
-A Tkinter window with a **Connect** button (runs `connect.sh` in the background — no need to run it separately first), drive buttons + WASD/arrow keys, a speed slider, a **Car / Servo / Auto** mode toggle, live Distance/Servo readouts, and a timestamped command log. Manual controls grey out while Auto is active. Needs `python3-tk`:
+A Tkinter window with a **Connect** button (runs `connect.sh` in the background — no need to run it separately first), drive buttons + WASD/arrow keys, a speed slider, a **Car / Servo / Auto** mode toggle, a **Horn** button, 8 **RGB** color swatches, live Distance/Servo readouts, and a timestamped command log. Manual drive controls grey out while Auto is active; Horn and RGB stay enabled in every mode. Needs `python3-tk`:
 
 ```bash
 sudo apt install python3-tk
