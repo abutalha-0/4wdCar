@@ -1,5 +1,11 @@
-// 4WD car control via keyboard (Serial), see README.md for wiring.
+// 4WD car control via keyboard (Bluetooth serial), see README.md for wiring.
 // W = forward, S = backward, A = left, D = right, Space = stop
+
+#include <SoftwareSerial.h>
+
+const int BT_RX = 7; // HC-05 TXD
+const int BT_TX = 8; // HC-05 RXD (through voltage divider)
+SoftwareSerial bt(BT_RX, BT_TX);
 
 const int IN1 = 2;  // Left side
 const int IN2 = 3;  // Left side
@@ -77,12 +83,12 @@ void setup() {
   analogWrite(ENB, SPEED);
   stopCar();
 
-  Serial.begin(9600);
+  bt.begin(9600);
 }
 
 void loop() {
-  while (Serial.available() > 0) {
-    char c = Serial.read();
+  while (bt.available() > 0) {
+    char c = bt.read();
     switch (c) {
       case 'w': case 'W':
         moveForward();
