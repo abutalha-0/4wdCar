@@ -4,6 +4,24 @@
 
 ### Arduino Uno
 
+Full pin map — details for each in the sections below.
+
+| Pin | Used by |
+|---|---|
+| D2, D3 | L298N IN1/IN2 (left motors) |
+| D4, D5 | L298N IN3/IN4 (right motors) |
+| D6 | L298N ENA (left speed, PWM) |
+| D7, D8 | HC-05 Bluetooth (SoftwareSerial) |
+| D9 | Pan servo |
+| D10 | HC-SR04 Echo |
+| D11 | L298N ENB (right speed, PWM) |
+| D12 | HC-SR04 Trig |
+| A4, A5 | LCD I2C (SDA/SCL) |
+
+**Still free: A0–A3**, plus D13 and D0/D1 with caveats — D13 shares a trace with the onboard LED, and D0/D1 are the USB serial pins, so anything wired there has to come off before each upload.
+
+Note that **all six PWM-capable pins (D3, D5, D6, D9, D10, D11) are already in use**, so anything new that needs analog output (dimming an LED, a passive buzzer via `tone()`) has no hardware PWM left. Addressable devices that bit-bang their own signal (WS2812 LEDs) or use I2C are the easier way to expand from here.
+
 ### Motors
 
 4WD chassis with two motors per side, wired in parallel per side (not independently addressable):
@@ -55,7 +73,7 @@ Echo is deliberately not on D13 — that pin is hard-wired to the Uno's built-in
 | Servo wire | Connects to |
 |---|---|
 | Signal (orange/yellow) | D9 |
-| VCC (red) | **Separate 5V supply** — not the Arduino's 5V pin, to avoid brownouts. Use the L298N's onboard 5V regulator output (if its jumper is enabled and rated for the extra load) or a dedicated UBEC. |
+| VCC (red) | **Separate 5V supply** — not the Arduino's 5V pin, and not the L298N's onboard regulator either (see [Power](#power)). A dedicated UBEC is the right answer. |
 | GND (brown/black) | Common ground with everything else |
 
 If the servo jitters while holding a position, it's most likely noise from the L298N's onboard regulator, not a wiring fault — add a decoupling capacitor (~470µF electrolytic + ~0.1µF ceramic, in parallel) across the servo's VCC/GND, as close to the servo leads as possible.
@@ -63,6 +81,30 @@ If the servo jitters while holding a position, it's most likely noise from the L
 Mounted at the front of the chassis with the HC-SR04 on its horn.
 
 With the servo as currently mounted, a **higher** angle points the sensor **left** and a lower angle points it right. `CarControl.ino` encodes this in one place per mode — the `'a'`/`'d'` cases in Servo mode, and `AUTO_LOOK_LEFT_ANGLE`/`AUTO_LOOK_RIGHT_ANGLE` for Autonomous. If the servo is ever remounted and left/right come out swapped, flip both together (they're commented as such) so manual panning and autonomous scanning stay consistent.
+
+### 16x2 I2C LCD
+
+| LCD backpack | Arduino |
+|---|---|
+| VCC | 5V |
+| GND | GND |
+| SDA | A4 |
+| SCL | A5 |
+
+A4/A5 are the Uno's dedicated I2C pins — they aren't configurable. Address is **0x27**, set as `LCD_ADDRESS` in [`CarControl/CarControl.ino`](CarControl/CarControl.ino).
+
+Backpacks ship as either `0x27` or `0x3F` depending on the chip (PCF8574 vs PCF8574A) and its solder jumpers, so if you swap modules, run [`LcdTest/`](LcdTest/LcdTest.ino) — it scans the bus and reports the address rather than making you guess.
+
+**Debugging a blank display.** The symptoms look alike but have very different causes:
+
+| What you see | Cause |
+|---|---|
+| Backlight on, screen blank or solid blocks, **I2C scan finds the address** | Contrast. Turn the blue potentiometer on the back of the backpack — text only appears across part of its range. |
+| Backlight on, **I2C scan finds nothing** | Wiring or the backpack itself. Backlight only needs VCC and GND, so it lights up perfectly even when both data lines are dead — it tells you nothing about SDA/SCL. |
+
+That second row cost real time here. The order worth checking: swap SDA and SCL, reseat all four jumpers, try different jumper wires, then inspect the solder joints where the backpack meets the LCD's 16-pin header. If you need to rule out the pins themselves, [`PinTest/`](PinTest/PinTest.ino) sweeps A0–A5 with an LED.
+
+If the backpack turns out to be faulty, [`LcdDirectTest/`](LcdDirectTest/LcdDirectTest.ino) drives a bare HD44780 in 4-bit mode without it — though that needs 6 pins plus a contrast potentiometer instead of 2.
 
 ---
 
@@ -187,6 +229,24 @@ The Arduino streams these back over the same serial link:
 
 [`gui.py`](gui.py) parses `D:` and `A:` into live readouts and logs the rest.
 
+### On-car display
+
+The same information also goes to the LCD, so the car is readable without the laptop:
+
+| Line | Shows | Examples |
+|---|---|---|
+| 0 | Mode, the number that matters in that mode, and distance | `CAR S:200 D:42`, `SRV A:90 D:42`, `AUTO D:18` |
+| 1 | Most recent event | `BOOT`, `FORWARD`, `STOP`, `MODE: SERVO`, `LOOK_LEFT`, `VERIFY` |
+
+Line 1 uses the same state names as the `STATE:` telemetry, which makes Autonomous mode much easier to follow — you can watch it reverse, scan, decide and verify on the display while the car is driving away from you.
+
+Two things about how it's written, both because I2C writes block and this sketch is already tight on interrupt timing (see below):
+
+- **No `clear()` in the hot path** — it blocks ~2ms on its own. Lines are space-padded to 16 characters and overwritten in place. The only `clear()` is at boot.
+- **Throttled and change-only** — at most one refresh per `LCD_REFRESH_MS`, and lines whose text hasn't changed aren't written at all.
+
+The display is probed once at boot. If it doesn't answer, `lcdPresent` stays false and every LCD call is skipped, so a loose wire costs you the display rather than stalling the car.
+
 ### Known limitations
 
 `Servo` and `SoftwareSerial` both depend on precise AVR interrupt timing and interfere with each other, and motor PWM adds electrical noise on top — Bluetooth bytes can occasionally arrive corrupted or dropped. Several things reduce this:
@@ -202,6 +262,8 @@ It isn't fully eliminated. If a command doesn't register, press again — that's
 ## Setup
 
 Upload [`CarControl/CarControl.ino`](CarControl/CarControl.ino) via the Arduino IDE before connecting Bluetooth (uploading and an active `/dev/rfcomm0` connection conflict).
+
+The sketch needs one library that isn't bundled with the IDE — **LiquidCrystal I2C** by Frank de Brabander (Tools → Manage Libraries). `Servo`, `SoftwareSerial` and `Wire` all ship with the IDE.
 
 ### GUI (recommended)
 
