@@ -6,10 +6,60 @@
 
 #include <SoftwareSerial.h>
 #include <Servo.h>
+#include <Wire.h>
+#include <LiquidCrystal_I2C.h>
 
 const int BT_RX = 7; // HC-05 TXD
 const int BT_TX = 8; // HC-05 RXD (through voltage divider)
 SoftwareSerial bt(BT_RX, BT_TX);
+
+// ---------------------------------------------------------------------------
+// 16x2 I2C LCD (SDA -> A4, SCL -> A5). Address confirmed by LcdTest.
+//
+// Line 0 is live status (mode / speed or angle / distance), line 1 is the most
+// recent event - so the car is readable at a glance without the laptop.
+//
+// Two rules matter here, both for the same reason: I2C writes are slow (~1ms
+// per line at 100kHz) and block, and this sketch already fights for interrupt
+// timing between Servo, SoftwareSerial and motor PWM. So:
+//   1. Never call lcd.clear() in the hot path - it blocks ~2ms on its own.
+//      Lines are space-padded to a fixed 16 chars and overwritten instead.
+//   2. Only actually write when the text changed, and no more often than
+//      LCD_REFRESH_MS.
+// Everything is also guarded by lcdPresent, so an unplugged display degrades
+// to "no display" rather than stalling the car.
+// ---------------------------------------------------------------------------
+const uint8_t LCD_ADDRESS = 0x27;
+const unsigned long LCD_REFRESH_MS = 250;
+
+LiquidCrystal_I2C lcd(LCD_ADDRESS, 16, 2);
+bool lcdPresent = false;
+
+char lcdWantLine0[17]; // what we want on screen
+char lcdWantLine1[17];
+char lcdHasLine0[17];  // what's actually on screen right now
+char lcdHasLine1[17];
+unsigned long lastLcdRefresh = 0;
+
+// Copies src into a fixed 16-char, space-padded buffer. Padding is what lets
+// us overwrite in place without clear() - leftover characters from a longer
+// previous message get blanked out by the trailing spaces.
+void lcdFill(char* dest, const char* src) {
+  int i = 0;
+  while (src[i] != '\0' && i < 16) {
+    dest[i] = src[i];
+    i++;
+  }
+  while (i < 16) {
+    dest[i++] = ' ';
+  }
+  dest[16] = '\0';
+}
+
+// Sets line 1 - the "log" line. Call this at any point worth reporting.
+void lcdLog(const char* msg) {
+  lcdFill(lcdWantLine1, msg);
+}
 
 const int IN1 = 2;  // Left side
 const int IN2 = 3;  // Left side
@@ -28,6 +78,7 @@ const int TRIG_PIN = 12;
 const int ECHO_PIN = 10;
 const unsigned long DISTANCE_INTERVAL_MS = 200;
 unsigned long lastDistanceSend = 0;
+long lastKnownDistance = -1; // most recent reading, for the LCD status line
 
 // pulseIn() BLOCKS until it sees an echo or hits this timeout, and while it
 // blocks SoftwareSerial can't reliably receive - so a long timeout directly
@@ -210,6 +261,52 @@ void stopCar() {
   rightStop();
 }
 
+// Builds line 0: mode, the number that matters in that mode, and distance.
+// Kept to 16 chars, e.g. "CAR S:200 D:42" / "SRV A:90 D:42" / "AUTO D:18".
+void lcdBuildStatus() {
+  char buf[17];
+  char distPart[8];
+
+  if (lastKnownDistance < 0) {
+    strcpy(distPart, "--"); // no echo / nothing in range
+  } else {
+    // Cast is safe: readings are centimetres, always well within int range.
+    itoa((int)lastKnownDistance, distPart, 10);
+  }
+
+  if (autonomousMode) {
+    snprintf(buf, sizeof(buf), "AUTO D:%s", distPart);
+  } else if (servoMode) {
+    snprintf(buf, sizeof(buf), "SRV A:%d D:%s", panAngle, distPart);
+  } else {
+    snprintf(buf, sizeof(buf), "CAR S:%d D:%s", speed, distPart);
+  }
+
+  lcdFill(lcdWantLine0, buf);
+}
+
+// Pushes pending text to the display. Only writes lines that actually
+// changed, and never more often than LCD_REFRESH_MS - see the notes at the
+// top: I2C writes block, and this sketch is already tight on interrupt time.
+void lcdRefresh() {
+  if (!lcdPresent) return;
+  if (millis() - lastLcdRefresh < LCD_REFRESH_MS) return;
+  lastLcdRefresh = millis();
+
+  lcdBuildStatus();
+
+  if (strcmp(lcdWantLine0, lcdHasLine0) != 0) {
+    lcd.setCursor(0, 0);
+    lcd.print(lcdWantLine0);
+    strcpy(lcdHasLine0, lcdWantLine0);
+  }
+  if (strcmp(lcdWantLine1, lcdHasLine1) != 0) {
+    lcd.setCursor(0, 1);
+    lcd.print(lcdWantLine1);
+    strcpy(lcdHasLine1, lcdWantLine1);
+  }
+}
+
 // Returns distance in cm, or -1 if no echo was received (out of range/timeout).
 long readDistanceCM() {
   digitalWrite(TRIG_PIN, LOW);
@@ -284,6 +381,7 @@ void autoEnterState(int newState) {
   autoState = (AutoState)newState;
   autoStateStartedAt = millis();
   bt.print("STATE:"); bt.println(autoStateName(newState));
+  lcdLog(autoStateName(newState)); // same names on the display's log line
 }
 
 void enterAutonomousMode() {
@@ -335,6 +433,7 @@ void updateAutonomous() {
       if (now - autoLastDistanceCheck >= DISTANCE_CHECK_INTERVAL_MS) {
         autoLastDistanceCheck = now;
         long distance = readDistanceFiltered();
+        lastKnownDistance = distance;
         // Only send this over Bluetooth once a second (not every 150ms
         // check) - sending it constantly while the motors are running
         // floods SoftwareSerial and seems to be corrupting bytes in
@@ -443,6 +542,7 @@ void updateAutonomous() {
       // drives into it": never assume a turn worked. Look again before
       // committing back to driving forward.
       long distance = readDistanceFiltered();
+      lastKnownDistance = distance;
       bt.print("D:"); bt.println(distance);
       if (distance >= OBSTACLE_CLEAR_CM) {
         // Genuinely clear now (OBSTACLE_CLEAR_CM, not OBSTACLE_STOP_CM -
@@ -480,6 +580,24 @@ void setup() {
 
   pinMode(TRIG_PIN, OUTPUT);
   pinMode(ECHO_PIN, INPUT);
+
+  // Probe for the LCD rather than assuming it's there - a loose wire should
+  // cost us the display, not stall the car on a blocking I2C write.
+  Wire.begin();
+  Wire.beginTransmission(LCD_ADDRESS);
+  lcdPresent = (Wire.endTransmission() == 0);
+
+  if (lcdPresent) {
+    lcd.init();
+    lcd.backlight();
+    lcd.clear(); // the one clear() we do - at boot, where blocking is free
+  }
+  // Seed both "what's on screen" buffers with spaces so the first real
+  // update always counts as a change and gets written.
+  lcdFill(lcdHasLine0, "");
+  lcdFill(lcdHasLine1, "");
+  lcdFill(lcdWantLine0, "");
+  lcdLog("BOOT");
 
   bt.begin(9600);
 
@@ -525,6 +643,7 @@ void loop() {
         if (!panServo.attached()) panServo.attach(SERVO_PIN);
         panServo.write(panAngle);
         bt.print("A:"); bt.println(panAngle);
+        lcdLog("MODE: SERVO");
       }
       continue;
     }
@@ -536,6 +655,7 @@ void loop() {
         // background while driving manually - it can fight with
         // SoftwareSerial's Bluetooth reception timing (see README).
         panServo.detach();
+        lcdLog("MODE: CAR");
       }
       continue;
     }
@@ -574,18 +694,23 @@ void loop() {
     switch (c) {
       case 'w': case 'W':
         moveForward();
+        lcdLog("FORWARD");
         break;
       case 's': case 'S':
         moveBackward();
+        lcdLog("BACKWARD");
         break;
       case 'a': case 'A':
         turnLeft();
+        lcdLog("LEFT");
         break;
       case 'd': case 'D':
         turnRight();
+        lcdLog("RIGHT");
         break;
       case ' ':
         stopCar();
+        lcdLog("STOP");
         break;
       case 'v': case 'V':
         awaitingSpeedByte = true;
@@ -602,6 +727,7 @@ void loop() {
   if (!autonomousMode && millis() - lastDistanceSend >= DISTANCE_INTERVAL_MS) {
     lastDistanceSend = millis();
     long cm = readDistanceCM();
+    lastKnownDistance = cm;
     bt.print("D:");
     bt.println(cm);
   }
@@ -609,4 +735,8 @@ void loop() {
   if (autonomousMode) {
     updateAutonomous();
   }
+
+  // Last thing each pass: throttled, change-only, so it costs almost nothing
+  // on the passes where nothing moved.
+  lcdRefresh();
 }
