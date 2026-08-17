@@ -22,6 +22,11 @@ Servo panServo;
 int panAngle = 90; // 0-180, centered
 bool servoMode = false; // toggled by the GUI's Debug button ('g'/'c')
 
+const int TRIG_PIN = 12;
+const int ECHO_PIN = 10;
+const unsigned long DISTANCE_INTERVAL_MS = 200;
+unsigned long lastDistanceSend = 0;
+
 int speed = 200; // 0-255, changed via 'V' + one raw byte
 bool awaitingSpeedByte = false;
 
@@ -80,6 +85,19 @@ void stopCar() {
   rightStop();
 }
 
+// Returns distance in cm, or -1 if no echo was received (out of range/timeout).
+long readDistanceCM() {
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(2);
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+
+  long duration = pulseIn(ECHO_PIN, HIGH, 30000); // 30ms timeout, ~5m range
+  if (duration == 0) return -1;
+  return duration / 58;
+}
+
 void setup() {
   pinMode(IN1, OUTPUT);
   pinMode(IN2, OUTPUT);
@@ -94,6 +112,9 @@ void setup() {
 
   panServo.attach(SERVO_PIN);
   panServo.write(panAngle);
+
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
 
   bt.begin(9600);
 }
@@ -113,6 +134,7 @@ void loop() {
     if (c == 'g' || c == 'G') {
       stopCar();
       servoMode = true;
+      bt.print("A:"); bt.println(panAngle);
       continue;
     }
     if (c == 'c' || c == 'C') {
@@ -122,17 +144,22 @@ void loop() {
 
     if (servoMode) {
       switch (c) {
+        // Servo is mounted reversed, so 'a' (pan left) increases the angle
+        // and 'd' (pan right) decreases it.
         case 'a': case 'A':
-          panAngle = max(0, panAngle - SERVO_STEP);
-          panServo.write(panAngle);
-          break;
-        case 'd': case 'D':
           panAngle = min(180, panAngle + SERVO_STEP);
           panServo.write(panAngle);
+          bt.print("A:"); bt.println(panAngle);
+          break;
+        case 'd': case 'D':
+          panAngle = max(0, panAngle - SERVO_STEP);
+          panServo.write(panAngle);
+          bt.print("A:"); bt.println(panAngle);
           break;
         case 'w': case 'W':
           panAngle = 90;
           panServo.write(panAngle);
+          bt.print("A:"); bt.println(panAngle);
           break;
         default:
           break;
@@ -162,5 +189,12 @@ void loop() {
       default:
         break;
     }
+  }
+
+  if (servoMode && millis() - lastDistanceSend >= DISTANCE_INTERVAL_MS) {
+    lastDistanceSend = millis();
+    long cm = readDistanceCM();
+    bt.print("D:");
+    bt.println(cm);
   }
 }

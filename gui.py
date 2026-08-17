@@ -38,12 +38,26 @@ class CarGUI:
         self.connect_button.pack(side="left")
         self.status_label = tk.Label(top, text="Not connected", fg="red")
         self.status_label.pack(side="left", padx=8)
-        self.debug_button = tk.Button(
-            top, text="Debug: Car (click for Servo)", state="disabled",
-            command=self.on_debug_click,
+        mode_toggle = tk.Frame(top, bd=1, relief="solid")
+        mode_toggle.pack(side="left", padx=8)
+        self.car_toggle = tk.Button(
+            mode_toggle, text="Car", width=6, state="disabled", bd=0,
+            command=lambda: self.set_mode(False),
         )
-        self.debug_button.pack(side="left", padx=8)
-        self.drive_widgets.append(self.debug_button)
+        self.car_toggle.pack(side="left")
+        self.servo_toggle = tk.Button(
+            mode_toggle, text="Servo", width=6, state="disabled", bd=0,
+            command=lambda: self.set_mode(True),
+        )
+        self.servo_toggle.pack(side="left")
+        self.default_button_bg = self.car_toggle.cget("bg")
+        self.drive_widgets.append(self.car_toggle)
+        self.drive_widgets.append(self.servo_toggle)
+        self.update_mode_toggle()
+        self.distance_label = tk.Label(top, text="Distance: -- cm")
+        self.distance_label.pack(side="left", padx=8)
+        self.servo_label = tk.Label(top, text="Servo: -- deg")
+        self.servo_label.pack(side="left", padx=8)
 
         pad = tk.Frame(root)
         pad.pack(padx=10, pady=10)
@@ -111,6 +125,36 @@ class CarGUI:
             w.configure(state="normal")
         self.log_message(f"Connected to {PORT}.")
 
+        threading.Thread(target=self.read_loop, daemon=True).start()
+
+    def read_loop(self):
+        while True:
+            try:
+                line = self.ser.readline()
+            except (serial.SerialException, OSError):
+                return
+            if not line:
+                continue
+            text = line.decode(errors="ignore").strip()
+            if text:
+                self.root.after(0, self.handle_serial_line, text)
+
+    def handle_serial_line(self, text):
+        if text.startswith("D:"):
+            try:
+                cm = int(text[2:])
+            except ValueError:
+                return
+            self.distance_label.configure(text="Distance: out of range" if cm < 0 else f"Distance: {cm} cm")
+        elif text.startswith("A:"):
+            try:
+                angle = int(text[2:])
+            except ValueError:
+                return
+            self.servo_label.configure(text=f"Servo: {angle} deg")
+        else:
+            self.log_message(f"received {text!r}")
+
     def on_key_press(self, event):
         key = event.keysym.lower()
         if key not in KEY_MAP:
@@ -137,18 +181,27 @@ class CarGUI:
 
         self.release_timers[key] = self.root.after(50, do_release)
 
-    def on_debug_click(self):
-        if self.ser is None:
+    def set_mode(self, servo):
+        if self.ser is None or servo == self.servo_mode:
             return
-        self.servo_mode = not self.servo_mode
-        if self.servo_mode:
+        self.servo_mode = servo
+        if servo:
             self.ser.write(b"g")
-            self.debug_button.configure(text="Debug: Servo (click for Car)")
             self.log_message("Switched to Servo debug mode. W=center, A=pan left, D=pan right.")
         else:
             self.ser.write(b"c")
-            self.debug_button.configure(text="Debug: Car (click for Servo)")
             self.log_message("Switched back to Car mode.")
+        self.update_mode_toggle()
+
+    def update_mode_toggle(self):
+        active_bg = "#3a7bd5"
+        active_fg = "white"
+        if self.servo_mode:
+            self.car_toggle.configure(bg=self.default_button_bg, fg="black", relief="raised")
+            self.servo_toggle.configure(bg=active_bg, fg=active_fg, relief="sunken")
+        else:
+            self.car_toggle.configure(bg=active_bg, fg=active_fg, relief="sunken")
+            self.servo_toggle.configure(bg=self.default_button_bg, fg="black", relief="raised")
 
     def on_speed_change(self, value):
         if self.ser is None:
