@@ -28,6 +28,8 @@ class CarGUI:
         self.root = root
         self.pressed = set()
         self.release_timers = {}
+        self.servo_mode = False
+        self.drive_widgets = []
         root.title("4WD Car Control")
 
         top = tk.Frame(root)
@@ -36,6 +38,12 @@ class CarGUI:
         self.connect_button.pack(side="left")
         self.status_label = tk.Label(top, text="Not connected", fg="red")
         self.status_label.pack(side="left", padx=8)
+        self.debug_button = tk.Button(
+            top, text="Debug: Car (click for Servo)", state="disabled",
+            command=self.on_debug_click,
+        )
+        self.debug_button.pack(side="left", padx=8)
+        self.drive_widgets.append(self.debug_button)
 
         pad = tk.Frame(root)
         pad.pack(padx=10, pady=10)
@@ -48,7 +56,6 @@ class CarGUI:
             self.drive_widgets.append(b)
             return b
 
-        self.drive_widgets = []
         make_button("Forward", "w", 0, 1)
         make_button("Left", "a", 1, 0)
         make_button("Stop", " ", 1, 1)
@@ -129,6 +136,19 @@ class CarGUI:
                 self.send(" ", "STOP")
 
         self.release_timers[key] = self.root.after(50, do_release)
+
+    def on_debug_click(self):
+        if self.ser is None:
+            return
+        self.servo_mode = not self.servo_mode
+        if self.servo_mode:
+            self.ser.write(b"g")
+            self.debug_button.configure(text="Debug: Servo (click for Car)")
+            self.log_message("Switched to Servo debug mode. W=center, A=pan left, D=pan right.")
+        else:
+            self.ser.write(b"c")
+            self.debug_button.configure(text="Debug: Car (click for Servo)")
+            self.log_message("Switched back to Car mode.")
 
     def on_speed_change(self, value):
         if self.ser is None:

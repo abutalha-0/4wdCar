@@ -1,7 +1,9 @@
 // 4WD car control via keyboard (Bluetooth serial), see README.md for wiring.
-// W = forward, S = backward, A = left, D = right, Space = stop
+// Car mode:   W = forward, S = backward, A = left, D = right, Space = stop
+// Servo mode: A = pan left, D = pan right, W = center, entered/exited via 'g'/'c'
 
 #include <SoftwareSerial.h>
+#include <Servo.h>
 
 const int BT_RX = 7; // HC-05 TXD
 const int BT_TX = 8; // HC-05 RXD (through voltage divider)
@@ -13,6 +15,12 @@ const int IN3 = 4;  // Right side
 const int IN4 = 5;  // Right side
 const int ENA = 6;  // Left side enable (PWM)
 const int ENB = 11; // Right side enable (PWM)
+
+const int SERVO_PIN = 9;
+const int SERVO_STEP = 10; // degrees per keypress
+Servo panServo;
+int panAngle = 90; // 0-180, centered
+bool servoMode = false; // toggled by the GUI's Debug button ('g'/'c')
 
 int speed = 200; // 0-255, changed via 'V' + one raw byte
 bool awaitingSpeedByte = false;
@@ -84,6 +92,9 @@ void setup() {
   analogWrite(ENB, speed);
   stopCar();
 
+  panServo.attach(SERVO_PIN);
+  panServo.write(panAngle);
+
   bt.begin(9600);
 }
 
@@ -96,6 +107,36 @@ void loop() {
       analogWrite(ENA, speed);
       analogWrite(ENB, speed);
       awaitingSpeedByte = false;
+      continue;
+    }
+
+    if (c == 'g' || c == 'G') {
+      stopCar();
+      servoMode = true;
+      continue;
+    }
+    if (c == 'c' || c == 'C') {
+      servoMode = false;
+      continue;
+    }
+
+    if (servoMode) {
+      switch (c) {
+        case 'a': case 'A':
+          panAngle = max(0, panAngle - SERVO_STEP);
+          panServo.write(panAngle);
+          break;
+        case 'd': case 'D':
+          panAngle = min(180, panAngle + SERVO_STEP);
+          panServo.write(panAngle);
+          break;
+        case 'w': case 'W':
+          panAngle = 90;
+          panServo.write(panAngle);
+          break;
+        default:
+          break;
+      }
       continue;
     }
 
