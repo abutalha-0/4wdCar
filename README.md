@@ -60,7 +60,9 @@ Echo is deliberately not on D13 — that pin is hard-wired to the Uno's built-in
 
 If the servo jitters while holding a position, it's most likely noise from the L298N's onboard regulator, not a wiring fault — add a decoupling capacitor (~470µF electrolytic + ~0.1µF ceramic, in parallel) across the servo's VCC/GND, as close to the servo leads as possible.
 
-Mount the servo at the front of the chassis with the HC-SR04 on its horn. (Not mounted yet as of writing — bench-tested first.)
+Mounted at the front of the chassis with the HC-SR04 on its horn.
+
+The servo ended up mounted physically reversed relative to how it was bench-tested — commanding a higher angle (via `A` in Servo mode) actually pans the sensor left, and a lower angle pans it right. `CarControl.ino` compensates for this in software (see Controls below) so the on-screen "pan left"/"pan right" behavior matches reality; the raw angle sent to `Servo.write()` is still just 0-180.
 
 ---
 
@@ -96,7 +98,9 @@ Baud Rate
 
 ## Controls
 
-Single-character commands over serial (USB or Bluetooth), 9600 baud. Letters are case-insensitive (`o` and `O` both work).
+Single-character commands over serial (Bluetooth via `/dev/rfcomm0`, or USB), 9600 baud. Letters are case-insensitive (`w` and `W` both work). Implemented in [`CarControl/CarControl.ino`](CarControl/CarControl.ino).
+
+### Car mode (default)
 
 | Key | Action |
 |-------|--------|
@@ -104,67 +108,73 @@ Single-character commands over serial (USB or Bluetooth), 9600 baud. Letters are
 | A | Left |
 | S | Backward |
 | D | Right |
-| Space | Stop (works in any mode, including Autonomous) |
-| Q | Quit controller (host-side only, `controller.py`) |
-
-### Modes
-
-| Key | Mode | Behavior |
-|-----|------|----------|
-| N | Normal | Default driving speed |
-| T | Turbo | Max speed |
-| P | Precision | Reduced speed, for tight maneuvering |
-| O | Autonomous | Ignores W/A/S/D; drives itself at a fixed ~55% speed. On obstacle (<20cm ahead, median-of-3 filtered): backs up briefly, checks left first and commits to a ~90° left turn if clear, otherwise checks right and turns there, otherwise backs off further and spins ~180° to try a different direction (won't just give up in a corner) |
+| Space | Stop |
 
 ### Speed
 
-Send `V` followed immediately by one raw byte (0-255) to set an exact speed, independent of mode — e.g. mode presets pick a starting speed, but a `V` command overrides it until the next mode switch. Autonomous mode ignores `V` entirely and always drives at its own fixed speed (~140/255, ~55%).
+Send `V` followed immediately by one raw byte (0-255) to set the drive speed (PWM duty cycle on `ENA`/`ENB`). Stays in effect until the next `V` command.
+
+### Servo/debug mode
+
+| Key | Action |
+|-------|--------|
+| G | Enter Servo mode (stops the car first) |
+| C | Return to Car mode |
+
+While in Servo mode, `W`/`A`/`S`/`D` control the pan servo instead of driving:
+
+| Key | Action |
+|-------|--------|
+| A | Pan left (steps the servo angle) |
+| D | Pan right (steps the servo angle) |
+| W | Center (90°) |
+
+The Arduino also streams live telemetry back over the same serial link while in Servo mode:
+
+- `D:<cm>\n` — ultrasonic distance reading (HC-SR04), sent about every 200ms. `-1` means no echo (out of range/timeout).
+- `A:<angle>\n` — current servo angle (0-180), sent whenever it changes.
+
+[`gui.py`](gui.py) parses both and shows them as live "Distance" / "Servo" readouts.
 
 ### Known limitation
 
-`Servo` and `SoftwareSerial` both depend on precise AVR interrupt timing, and can occasionally interfere with each other — a Bluetooth command can rarely be dropped mid-receive. `loop()` drains every queued byte each pass to reduce the odds of this, but it isn't fully eliminated. If a mode/command press doesn't register, try again — this is a known hardware/library interaction, not a logic bug.
+`Servo` and `SoftwareSerial` both depend on precise AVR interrupt timing, and can occasionally interfere with each other — a Bluetooth command can rarely be dropped mid-receive. `loop()` drains every queued byte each pass to reduce the odds of this, but it isn't fully eliminated. If a command press doesn't register, try again — this is a known hardware/library interaction, not a logic bug.
 
 ---
 
 ## Setup
 
-Connect Bluetooth
+Upload [`CarControl/CarControl.ino`](CarControl/CarControl.ino) via the Arduino IDE before connecting Bluetooth (uploading and an active `/dev/rfcomm0` connection conflict).
 
-```bash
-./connect.sh
-```
-
-Run controller
-
-```bash
-./run.sh
-```
-
-Disconnect
-
-```bash
-./disconnect.sh
-```
-
-Or use the GUI instead of the scripts above — Connect/Disconnect/Run/Stop buttons, with a log panel:
+### GUI (recommended)
 
 ```bash
 ./gui.sh
 ```
 
-The GUI needs `python3-tk` (one-time system install) and uses `pkexec` to prompt for root graphically:
+A Tkinter window with a **Connect** button (runs `connect.sh` in the background — no need to run it separately first), drive buttons + WASD/arrow keys, a speed slider, a Car/Servo mode toggle, live Distance/Servo readouts, and a timestamped command log. Needs `python3-tk`:
 
 ```bash
 sudo apt install python3-tk
 ```
 
-Or use the web UI — same Connect/Disconnect, plus speed, mode, and drive controls:
+`sudo` may prompt for a password the first time you click Connect — that prompt appears in whichever terminal you launched `gui.py` from.
+
+### Terminal / scripted control
+
+Connect Bluetooth (backgrounds an `rfcomm connect`, polls until `/dev/rfcomm0` is live):
 
 ```bash
-./web.sh
+./connect.sh
 ```
 
-Then open `http://localhost:8765`. This runs [`bridge.py`](bridge.py), a small local server that serves the page from [`web/`](web/) and relays its commands to the Arduino over `/dev/rfcomm0` (same `pkexec`/rfcomm approach as the GUI — no need to run `connect.sh` separately, the page's Connect button does it). It doesn't use Web Bluetooth, since the HC-05 is classic Bluetooth (SPP), not BLE, which browsers can't talk to directly.
+Then drive with hold-to-move keyboard control:
+
+```bash
+python3 controller.py
+```
+
+W/A/S/D to drive (hold to move, release to stop), Q to quit. The `keyboard` module needs root or your user in the `input` group to capture keys on Linux.
 
 ---
 
@@ -186,6 +196,6 @@ pip install pyserial keyboard
 
 ## Notes
 
-- Keep `connect.sh` running while driving.
+- `connect.sh` backgrounds the Bluetooth connection process; leave it (or the GUI) running while driving.
 - Upload Arduino sketches before starting the Bluetooth connection.
-- Disconnect the Bluetooth session before uploading new sketches.
+- Kill the active `rfcomm connect` process (`sudo pkill -f "rfcomm connect rfcomm0"`) before uploading new sketches — the serial port can't be shared between them.
