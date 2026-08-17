@@ -11,10 +11,21 @@ import serial
 PORT = "/dev/rfcomm0"
 BAUD = 9600
 
+# Maps both WASD and arrow keysyms to the same drive command/label.
+KEY_MAP = {
+    "w": ("w", "Forward"), "up": ("w", "Forward"),
+    "a": ("a", "Left"), "left": ("a", "Left"),
+    "s": ("s", "Backward"), "down": ("s", "Backward"),
+    "d": ("d", "Right"), "right": ("d", "Right"),
+}
+
 
 class CarGUI:
     def __init__(self, root, ser):
         self.ser = ser
+        self.root = root
+        self.pressed = set()
+        self.release_timers = {}
         root.title("4WD Car Control")
 
         pad = tk.Frame(root)
@@ -36,6 +47,36 @@ class CarGUI:
         tk.Label(root, text="Log").pack(anchor="w", padx=10)
         self.log = tk.Text(root, width=50, height=12, state="disabled")
         self.log.pack(padx=10, pady=(0, 10))
+
+        root.bind("<KeyPress>", self.on_key_press)
+        root.bind("<KeyRelease>", self.on_key_release)
+        root.focus_set()
+
+    def on_key_press(self, event):
+        key = event.keysym.lower()
+        if key not in KEY_MAP:
+            return
+        timer = self.release_timers.pop(key, None)
+        if timer is not None:
+            self.root.after_cancel(timer)
+            return  # auto-repeat while held, not a new press
+        if key not in self.pressed:
+            self.pressed.add(key)
+            cmd, label = KEY_MAP[key]
+            self.send(cmd, label)
+
+    def on_key_release(self, event):
+        key = event.keysym.lower()
+        if key not in KEY_MAP:
+            return
+
+        def do_release():
+            self.release_timers.pop(key, None)
+            if key in self.pressed:
+                self.pressed.discard(key)
+                self.send(" ", "STOP")
+
+        self.release_timers[key] = self.root.after(50, do_release)
 
     def send(self, cmd, label):
         self.ser.write(cmd.encode())
